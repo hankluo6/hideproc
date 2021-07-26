@@ -256,6 +256,7 @@ static void _hideproc_exit(void)
     device_destroy(hideproc_class, MKDEV(dev_major, MINOR_VERSION));
     class_destroy(hideproc_class);
     cdev_del(&cdev);
+
     hook_remove(&hook);
 }
 
