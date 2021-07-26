@@ -4,9 +4,24 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
+#include <linux/kprobes.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
+
+static unsigned long lookup_name(const char *name)
+{
+	struct kprobe kp = {
+		.symbol_name = name
+	};
+	unsigned long retval;
+
+	if (register_kprobe(&kp) < 0) 
+        return 0;
+	retval = (unsigned long) kp.addr;
+	unregister_kprobe(&kp);
+	return retval;
+}   
 
 enum RETURN_CODE { SUCCESS };
 
@@ -19,7 +34,7 @@ struct ftrace_hook {
 
 static int hook_resolve_addr(struct ftrace_hook *hook)
 {
-    hook->address = kallsyms_lookup_name(hook->name);
+    hook->address = lookup_name(hook->name);
     if (!hook->address) {
         printk("unresolved symbol: %s\n", hook->name);
         return -ENOENT;
@@ -107,7 +122,7 @@ static struct pid *hook_find_ge_pid(int nr, struct pid_namespace *ns)
 
 static void init_hook(void)
 {
-    real_find_ge_pid = (find_ge_pid_func) kallsyms_lookup_name("find_ge_pid");
+    real_find_ge_pid = (find_ge_pid_func) lookup_name("find_ge_pid");
     hook.name = "find_ge_pid";
     hook.func = hook_find_ge_pid;
     hook.orig = &real_find_ge_pid;
