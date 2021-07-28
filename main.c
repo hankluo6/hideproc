@@ -245,8 +245,14 @@ static int _hideproc_init(void)
 
 static void _hideproc_exit(void)
 {
+    pid_node_t *proc, *tmp_proc;
+
     printk(KERN_INFO "@ %s\n", __func__);
 
+    list_for_each_entry_safe(proc, tmp_proc, &hidden_proc, list_node) {
+        list_del(&proc->list_node);
+        kfree(proc);
+    }
     device_destroy(hideproc_class, MKDEV(dev_major, MINOR_VERSION));
     class_destroy(hideproc_class);
     cdev_del(&cdev);
