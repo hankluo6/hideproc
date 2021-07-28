@@ -228,7 +228,7 @@ static int _hideproc_init(void)
 {
     int err;
     printk(KERN_INFO "@ %s\n", __func__);
-    err = alloc_chrdev_region(&dev, 0, MINOR_VERSION, DEVICE_NAME);
+    err = alloc_chrdev_region(&dev, MINOR_VERSION, 1, DEVICE_NAME);
     dev_major = MAJOR(dev);
 
     hideproc_class = class_create(THIS_MODULE, DEVICE_NAME);
@@ -236,7 +236,7 @@ static int _hideproc_init(void)
     cdev_init(&cdev, &fops);
     cdev_add(&cdev, MKDEV(dev_major, MINOR_VERSION), 1);
     device_create(hideproc_class, NULL, MKDEV(dev_major, MINOR_VERSION), NULL,
-                  DEVICE_NAME);
+                    DEVICE_NAME);
 
     init_hook();
 
